@@ -34,12 +34,51 @@
 
 ## 2. 严重报警处置单（状态机）
 
-- 表：`t_veh_handle_flow`；服务 `TVehHandleFlowServiceImpl`；入口 `POST /vehHandleFlow/advance|rollback`。
-- 环节 `stage` 0定级 1知会 2回告 3归档；情形 `status` 0未起 1在办 2已封尾。
-- 步次与情形同源，唯一落法 `moveTo`：一次只挪一档（早先 advance 误 +2 跳档）；
-  走到归档(3)即封尾(2)；只要流程动过（含退回头一档重办）都算在办。
-- 已封尾：拒推、`updateContent` 拒改、`remove` 拒删（归档在册留查）。
-- 头一档退无可退、不存在的单：动作返回 null/false，不抛异常。
+- 表：`t_veh_handle_flow`（卷）+ `t_veh_handle_note`（一段一段的按语）；
+  服务 `TVehHandleFlowServiceImpl`；唯一一把尺 `VehHandleRuler`（纯算，不碰库）。
+- 四站 `stage` 0定性 1知会 2回告 3归档；情形 `status` 0未起 1在办 2已封尾。
+  新单立单即在办（0未起只留给建了没动过的存量旧账）。
+- **四问只认一处**：这一张走到哪一站、下一站开不开、收口后再递接不接、同站第二遍另不另起行——
+  册面（`/list` 台账、`/detail` 回读）与报文收口两边同一句答案，全出 `VehHandleRuler` + 服务，
+  控制器只递话，别处不许另答、不许事先替卷把站次定好。
+- **步次只有一个来处**：系统数已经过的站数（`stage` 一栏）。报文里自报的 `claimStage` 只当来意，
+  落在回告段的 `claim_stage` 与卷上 `reply_claim_stage` 留痕；与系统站次不一致时，
+  入库按系统数的记、回读照系统数的回（`POST /vehHandleFlow/reply`，回执 `VehHandleReplyReceipt`
+  把当站、来意、一不一致、开不开全回挂）。去年秋天报文推着走两站的旧路已堵死。
+- **立单（定性站）四样齐才起**（`POST /open`，`VehHandleOpenForm`）：车辆营运代号 `veh_code`、
+  报警发生那一刻 `alarm_at`（墙钟 yyyy-MM-dd HH:mm:ss）、当刻那个数（`measure_kind`=speed/duration
+  配 `alarm_value`，车速 km/h、连续驾驶时长小时）、报警类别 `alarm_kind`；缺一样抛
+  `VehHandleRejectException`（点明哪一格）。单号系统排（CL+雪花），卷上自带号不认。
+- **同车同类只容一张没收口的卷**：`veh_code+alarm_kind` 已有非封尾卷（在办或半道止住，含存量未起），
+  第二张起不来。
+- 往前走只留一处口子 `moveTo`：一次只挪一档，跳站不作数。各站守门（`VehHandleRuler.nextBlockReason`）：
+  - 知会站：看知会几笔全没全（`notify_required` 当地定，缺省 1；`notify_count` 落一笔加一）。
+    笔记走 `POST /notify`；**笔记只记数不挪步**——末笔齐了卷也停在知会站，进回告站只由 advance 开；
+    已齐再递不另起新行、不抛错。
+  - 回告站：守当地定的钟点 `reply_wait_hours`——从**进回告站那一刻** `notify_done_at` 起数，
+    钟点没走满（压线：正满那一刻算满，墙钟字符串比），企业回话递得再齐 advance 也当没开；
+    且回话（`reply_count>0`）本身得到。
+  - 归档站：只等复查意见 `review_opinion` 落下（`POST /review`），落下即凭 `REVIEW` 入档收口。
+- **回告报文**：只在系统数出来的回告站接头一遍（落 REPLY 段、`reply_count=1`）；
+  不在回告站（报文说自己到了后面几站也没用）、查无此单、收口后的，一律不接、卷上一格不动
+  （被拒的回话连段也不留）；同站第二遍 accepted 但 `newLine=false`，卷上还是头一遍那行字。
+- **收口两说**（任何在办站都收得，`close_kind` 钉凭据）：
+  `OUTSIDE` 不归运输机构督办（`/closeOutside`）；`DEREGISTERED` 业户已销户
+  （`/closeDeregistered`，名录 `t_veh_ent.status=1` 核实，没落代号/查无/在册都收不得）。
+- **收了口便封住**（`closeFlow` 唯一落法，status=2）：推、退、`updateContent`、`remove`、再接回告全拒，
+  修改位置一律锁死、整张撤不掉；季度追查从入档往回数段全凭卷。
+- **退**（旧 `/rollback` 模样不改）：一次只退一站；被退站的旧按语一段不抹（留痕压末位），
+  重走时该站攒头清零重攒——退回知会：知会几笔/回告几笔/钟点起算点/来意全清；
+  退回回告：只清本趟回告，知会那几笔与钟点起算点不动。头一站退无可退返 null。
+- **按语段 `t_veh_handle_note`**：每段钉 flow_id、当站（系统数的）、话种
+  OPEN/NOTIFY/REPLY/REVIEW/CLOSE/MOVE、话、时刻；回读按 note_at,id 升序挂齐。
+  同一秒钟两条来路各记各的行，不合成、不漏记。
+- **在办卷数**：起一张加一、收一张减一。值班屏 `GET /list` 一条 SQL
+  （`TVehHandleFlowBoardMapper.xml`）：名单分页与屏头数同一快照（全册 `del_flag=0 且 status<>2`
+  标量子查询，不随筛选借行），与回库一站一站点出来的本是同一次算；`ResultTable.handleTotal/handleActive`。
+- **旧口子模样不改**：`advance(id,remark)`/`rollback(id,remark)` 仍是进一个号、还一张单（拒返 null）；
+  `updateContent`/`remove` 返 boolean。日后要换一种走法，另起一套去接，不回头动它。
+- 旧库补列见 `doc/schema/veh.sql` 末尾（新列 + 新建 `t_veh_handle_note`）。
 
 ## 3. 移交执法核签单（多档签批）
 
@@ -115,5 +154,7 @@ mvn -o test
 
 不启 Spring、桩掉 Mapper 的单测在 `src/test/java/com/fc/v2/service/`，
 需求点过名的坑（压线、同一把舍法、历史窗口、说话次序、停用、悬空代号、状态同源、签批过档、催办窗口、
-批派窗口静默段/办事日剔假/废格卡环/销户空联络人/同户相斥/休办定额顺延/双痕迹/回库现点/五百截断等）
-都有对应用例钉着；改口径先改/加这些用例。
+批派窗口静默段/办事日剔假/废格卡环/销户空联络人/同户相斥/休办定额顺延/双痕迹/回库现点/五百截断、
+处置单定性四样/同车同类相斥/紧邻站/知会几笔/回告钟点压线/报文步次只当来意/同站不另起行/同秒两段/
+退回清零旧段不抹/收口两说封死只读/台账同算等）
+都有对应用例钉着；改口径先改/加这些用例。处置单尺子的纯算用例在 `VehHandleRulerTest`。

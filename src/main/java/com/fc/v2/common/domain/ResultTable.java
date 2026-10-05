@@ -43,6 +43,16 @@ public class ResultTable {
      */
     private Integer bindLack;
 
+    /**
+     * 处置单台账屏头：本屏卷数
+     */
+    private Long handleTotal;
+
+    /**
+     * 处置单台账屏头：全册没收口的卷数（起一加一、收一减一，与名单同一次算）
+     */
+    private Integer handleActive;
+
     public Integer getCode() {
         return code;
     }
@@ -97,6 +107,22 @@ public class ResultTable {
 
     public void setBindLack(Integer bindLack) {
         this.bindLack = bindLack;
+    }
+
+    public Long getHandleTotal() {
+        return handleTotal;
+    }
+
+    public void setHandleTotal(Long handleTotal) {
+        this.handleTotal = handleTotal;
+    }
+
+    public Integer getHandleActive() {
+        return handleActive;
+    }
+
+    public void setHandleActive(Integer handleActive) {
+        this.handleActive = handleActive;
     }
 
     /**

@@ -1,0 +1,68 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+
+<mapper namespace="com.fc.v2.mapper.custom.TVehHandleFlowBoardMapper">
+
+    <!--
+      值班屏台账只此一条 SELECT：在办卷数随名单一起回来，
+      屏头"没收口几张"与一张一张点出来的卷同一次算成，谁也绕不开。
+      分页在服务层按这同一份名单切，不在库里另起第二条口径。
+    -->
+    <select id="selectBoardPage" parameterType="com.fc.v2.model.custom.VehHandleQuery"
+            resultType="com.fc.v2.model.auto.TVehHandleFlow">
+        SELECT
+            f.id,
+            f.biz_no,
+            f.stage,
+            f.status,
+            f.veh_code,
+            f.alarm_at,
+            f.measure_kind,
+            f.alarm_value,
+            f.alarm_kind,
+            f.site_no,
+            f.notify_required,
+            f.notify_count,
+            f.reply_count,
+            f.reply_wait_hours,
+            f.notify_done_at,
+            f.reply_claim_stage,
+            f.review_opinion,
+            f.close_kind,
+            f.content,
+            f.last_action,
+            f.del_flag,
+            f.create_by,
+            f.create_time,
+            f.update_by,
+            f.update_time,
+            f.remark,
+            e.site_name,
+            COUNT(*) OVER()                              AS board_total,
+            (SELECT COUNT(*) FROM t_veh_handle_flow
+               WHERE del_flag = 0 AND (status IS NULL OR status &lt;&gt; 2)) AS board_active_count
+        FROM t_veh_handle_flow f
+        <!-- LEFT JOIN：名录行即便销了户/删了留痕，卷上所知会业户的全称也照旧回显 -->
+        LEFT JOIN t_veh_ent e ON e.site_no = f.site_no AND e.del_flag = 0
+        <where>
+            f.del_flag = 0
+            <if test="bizNo != null and bizNo != ''">
+                AND f.biz_no LIKE CONCAT(#{bizNo}, '%')
+            </if>
+            <if test="vehCode != null and vehCode != ''">
+                AND f.veh_code LIKE CONCAT(#{vehCode}, '%')
+            </if>
+            <if test="alarmKind != null and alarmKind != ''">
+                AND f.alarm_kind LIKE CONCAT(#{alarmKind}, '%')
+            </if>
+            <if test="status != null">
+                AND f.status = #{status}
+            </if>
+            <if test="closeKind != null and closeKind != ''">
+                AND f.close_kind = #{closeKind}
+            </if>
+        </where>
+        ORDER BY f.id DESC
+    </select>
+
+</mapper>

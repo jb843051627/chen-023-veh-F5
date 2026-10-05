@@ -113,6 +113,18 @@ public class GlobalExceptionResolver{
     }
 
     /**
+     * 严重报警处置单退回：照原话退回，并点明卡在哪一站、哪一格
+     */
+    @ExceptionHandler(com.fc.v2.common.exception.VehHandleRejectException.class)
+    public AjaxResult vehHandleReject(com.fc.v2.common.exception.VehHandleRejectException e)
+    {
+        logger.error("严重报警处置单退回：{} - {}", e.getField(), e.getMessage());
+        AjaxResult result = AjaxResult.error(e.getMessage());
+        result.put("field", e.getField());
+        return result;
+    }
+
+    /**
      * 演示模式异常
      */
     @ExceptionHandler(DemoModeException.class)

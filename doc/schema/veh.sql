@@ -151,10 +151,24 @@ CREATE TABLE IF NOT EXISTS t_veh_ent (
 
 CREATE TABLE IF NOT EXISTS t_veh_handle_flow (
   id bigint NOT NULL COMMENT '主键',
-  biz_no varchar(64) DEFAULT NULL COMMENT '严重报警处置单代号',
-  stage int DEFAULT NULL COMMENT '当前步次 0..3（定级/知会/回告/归档）',
-  status int DEFAULT NULL COMMENT '处置单走到的那一步 0未起 1在办 2已封尾',
-  content varchar(255) DEFAULT NULL COMMENT '一段一记',
+  biz_no varchar(64) DEFAULT NULL COMMENT '严重报警处置单代号（系统排号，卷上自带的不认）',
+  stage int DEFAULT NULL COMMENT '当前步次 0..3（定级/知会/回告/归档），只由系统数过站得出',
+  status int DEFAULT NULL COMMENT '处置单情形 0未起 1在办 2已封尾（与步次同源，建单即在办）',
+  veh_code varchar(64) DEFAULT NULL COMMENT '车辆营运代号（定性四样之一）',
+  alarm_at datetime DEFAULT NULL COMMENT '报警发生那一刻（定性四样之一，墙钟 yyyy-MM-dd HH:mm:ss）',
+  measure_kind varchar(32) DEFAULT NULL COMMENT '当刻那个数量的是车速(speed)还是连续驾驶时长(duration)',
+  alarm_value decimal(12,3) DEFAULT NULL COMMENT '报警当刻那个数（车速 km/h、连续驾驶时长小时，定性四样之一）',
+  alarm_kind varchar(64) DEFAULT NULL COMMENT '报警属哪一类（定性四样之一；同车同类只容一张在办卷）',
+  site_no varchar(64) DEFAULT NULL COMMENT '所知会业户代号（对 t_veh_ent.site_no）',
+  notify_required int DEFAULT '1' COMMENT '知会站应齐几笔知会笔记（当地定，缺省一笔）',
+  notify_count int DEFAULT '0' COMMENT '知会站已落几笔知会笔记',
+  reply_count int DEFAULT '0' COMMENT '本趟回告站已落几笔回告（同站第二遍不另起行；退回知会清零，重走重攒）',
+  reply_wait_hours int DEFAULT '0' COMMENT '回告站要守的钟点：知会齐后至少等几个钟点（当地定）',
+  notify_done_at datetime DEFAULT NULL COMMENT '知会笔记齐、进回告站那一刻（钟点起算点）',
+  reply_claim_stage int DEFAULT NULL COMMENT '最后一笔企业回告报文里自报的步次（只当来意留痕，绝不驱动站次）',
+  review_opinion varchar(500) DEFAULT NULL COMMENT '复查意见（入档那一站只看这格落没落）',
+  close_kind varchar(32) DEFAULT NULL COMMENT '凭什么收的口 REVIEW复查入档/OUTSIDE非运输机构督办/DEREGISTERED业户销户',
+  content varchar(255) DEFAULT NULL COMMENT '一段一记（旧格留着，式样不动）',
   last_action varchar(64) DEFAULT NULL COMMENT '最近一次挪步动作',
   del_flag int DEFAULT '0' COMMENT '删除标记 0正常 1删除',
   create_by varchar(64) DEFAULT NULL COMMENT '创建者',
@@ -162,8 +176,26 @@ CREATE TABLE IF NOT EXISTS t_veh_handle_flow (
   update_by varchar(64) DEFAULT NULL COMMENT '更新者',
   update_time datetime DEFAULT NULL COMMENT '更新时间',
   remark varchar(500) DEFAULT NULL COMMENT '备注',
-  PRIMARY KEY (id)
+  PRIMARY KEY (id),
+  KEY idx_veh_handle_active (veh_code, alarm_kind, status, del_flag),
+  KEY idx_veh_handle_status (status, del_flag)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='严重报警处置单';
+
+-- 卷上一段一段的按语：哪一站、哪一种话、落在哪一刻。退回站的旧段留痕不抹，同秒两条各记各的。
+CREATE TABLE IF NOT EXISTS t_veh_handle_note (
+  id bigint NOT NULL COMMENT '主键',
+  flow_id bigint NOT NULL COMMENT '所属处置单 id',
+  stage int DEFAULT NULL COMMENT '落段时系统数出来的当站（报文自报步次不进这格）',
+  note_kind varchar(16) NOT NULL COMMENT '话种 OPEN定性/NOTIFY知会笔记/REPLY企业回告/REVIEW复查意见/CLOSE收口/MOVE挪步按语',
+  note_text varchar(1000) DEFAULT NULL COMMENT '这一段写的话',
+  claim_stage int DEFAULT NULL COMMENT '报文来意步次（仅 REPLY 段留痕，别处空）',
+  note_at datetime DEFAULT NULL COMMENT '落在哪一刻（墙钟，同秒两段也各是各的行）',
+  del_flag int DEFAULT '0' COMMENT '删除标记 0正常 1删除',
+  create_by varchar(64) DEFAULT NULL COMMENT '创建者',
+  create_time datetime DEFAULT NULL COMMENT '创建时间',
+  PRIMARY KEY (id),
+  KEY idx_veh_handle_note_flow (flow_id, note_at, id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='严重报警处置单按语段';
 
 CREATE TABLE IF NOT EXISTS t_veh_move_bill (
   id bigint NOT NULL COMMENT '主键',
@@ -253,3 +285,21 @@ VALUES (0, 'YH00', '宁州顺达客运有限公司（道路旅客运输业户，
 -- ALTER TABLE t_veh_due_task ADD KEY idx_veh_due_assignee (assignee_no);
 -- 另需补建三张新表：t_veh_nonwork_day / t_veh_due_handler / t_veh_due_handler_kind（照上面 CREATE 语句）。
 
+
+-- 旧库补列（t_veh_handle_flow 为旧版表结构时逐条执行；新库由上面的 CREATE TABLE 带出，勿重复执行）：
+-- ALTER TABLE t_veh_handle_flow ADD COLUMN veh_code varchar(64) DEFAULT NULL COMMENT '车辆营运代号（定性四样）' AFTER status;
+-- ALTER TABLE t_veh_handle_flow ADD COLUMN alarm_at datetime DEFAULT NULL COMMENT '报警发生那一刻' AFTER veh_code;
+-- ALTER TABLE t_veh_handle_flow ADD COLUMN measure_kind varchar(32) DEFAULT NULL COMMENT '量别 speed车速 duration连续驾驶时长' AFTER alarm_at;
+-- ALTER TABLE t_veh_handle_flow ADD COLUMN alarm_value decimal(12,3) DEFAULT NULL COMMENT '当刻那个数（km/h 或小时）' AFTER measure_kind;
+-- ALTER TABLE t_veh_handle_flow ADD COLUMN alarm_kind varchar(64) DEFAULT NULL COMMENT '报警类别' AFTER alarm_value;
+-- ALTER TABLE t_veh_handle_flow ADD COLUMN site_no varchar(64) DEFAULT NULL COMMENT '所知会业户代号' AFTER alarm_kind;
+-- ALTER TABLE t_veh_handle_flow ADD COLUMN notify_required int DEFAULT 1 COMMENT '知会站应齐几笔' AFTER site_no;
+-- ALTER TABLE t_veh_handle_flow ADD COLUMN notify_count int DEFAULT 0 COMMENT '已知会几笔' AFTER notify_required;
+-- ALTER TABLE t_veh_handle_flow ADD COLUMN reply_count int DEFAULT 0 COMMENT '本趟已回告几笔（退回清零）' AFTER notify_count;
+-- ALTER TABLE t_veh_handle_flow ADD COLUMN reply_wait_hours int DEFAULT 0 COMMENT '回告等待钟点（小时）' AFTER notify_count;
+-- ALTER TABLE t_veh_handle_flow ADD COLUMN notify_done_at datetime DEFAULT NULL COMMENT '知会齐那一刻（钟点起算点）' AFTER reply_wait_hours;
+-- ALTER TABLE t_veh_handle_flow ADD COLUMN reply_claim_stage int DEFAULT NULL COMMENT '回告报文来意步次（驱动不了站次）' AFTER notify_done_at;
+-- ALTER TABLE t_veh_handle_flow ADD COLUMN review_opinion varchar(500) DEFAULT NULL COMMENT '复查意见' AFTER reply_claim_stage;
+-- ALTER TABLE t_veh_handle_flow ADD COLUMN close_kind varchar(32) DEFAULT NULL COMMENT '收口凭据 REVIEW/OUTSIDE/DEREGISTERED' AFTER review_opinion;
+-- ALTER TABLE t_veh_handle_flow ADD KEY idx_veh_handle_active (veh_code, alarm_kind, status, del_flag);
+-- 另需补建一张新表：t_veh_handle_note（照上面 CREATE 语句）。
