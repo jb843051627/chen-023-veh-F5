@@ -149,12 +149,30 @@ CREATE TABLE IF NOT EXISTS t_veh_ent (
   PRIMARY KEY (id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='运输业户总名录';
 
+-- 严重报警处置单：四站状态机（0定性 1知会 2回告 3归档），收过口即封尾只读。
+-- 步次不存别处给的号，只由系统按已过站口数推；active_slot=1 即唯一的那个"在办口"，
+-- 一辆车同一类报警同时只容一张没收口的卷（uk 兜并发双进）。
 CREATE TABLE IF NOT EXISTS t_veh_handle_flow (
   id bigint NOT NULL COMMENT '主键',
   biz_no varchar(64) DEFAULT NULL COMMENT '严重报警处置单代号',
-  stage int DEFAULT NULL COMMENT '当前步次 0..3（定级/知会/回告/归档）',
-  status int DEFAULT NULL COMMENT '处置单走到的那一步 0未起 1在办 2已封尾',
-  content varchar(255) DEFAULT NULL COMMENT '一段一记',
+  veh_code varchar(64) DEFAULT NULL COMMENT '车辆营运代号（定性四样之一）',
+  alarm_kind varchar(32) DEFAULT NULL COMMENT '报警属哪一类 speed超速 fatigue疲劳驾驶（兼作卷的去重键）',
+  alarm_at datetime DEFAULT NULL COMMENT '报警发生那一刻（定性四样之一）',
+  metric_value decimal(14,4) DEFAULT NULL COMMENT '当刻那个数（车速km/h 或 连续驾驶时长小时）',
+  site_no varchar(64) DEFAULT NULL COMMENT '所对运输业户代号（销户那两说按名录核验）',
+  stage int DEFAULT '0' COMMENT '当前停在哪一站 0定性 1知会 2回告 3归档（系统按已过站口数落，报文步次不作数）',
+  status int DEFAULT '0' COMMENT '情形 0未起 1在办 2已封尾（与步次同源，唯一落法）',
+  notice_count int DEFAULT '0' COMMENT '知会那一站该齐的笔数',
+  notice_done int DEFAULT '0' COMMENT '知会已记上的笔数',
+  reply_due_hours int DEFAULT NULL COMMENT '回告要守满的钟点（当地定的几个钟头）',
+  notice_at datetime DEFAULT NULL COMMENT '知会出站那一刻（回告钟点自这儿起算）',
+  review_opinion varchar(500) DEFAULT NULL COMMENT '复查意见（入档站只看这一格落没落）',
+  close_kind varchar(32) DEFAULT NULL COMMENT '收口名目 archive复查入档 notTransport不归运输机构督办 cancelled业户已销户',
+  closed_at datetime DEFAULT NULL COMMENT '收口那一刻',
+  active_slot int DEFAULT '1' COMMENT '在办口 1这张卷还没收口；收口置NULL（唯一索引里多个NULL不相顶，同车同类只容一个1）',
+  visit_no int DEFAULT '1' COMMENT '当前停着的这一站是第几回到（同站第二遍照旧段，退站重走另攒新段）',
+  claimed_stage int DEFAULT NULL COMMENT '报文捎来的步次（只当来意留痕，入库与回读的步次仍照系统数的）',
+  content varchar(255) DEFAULT NULL COMMENT '一段一记（旧式样保留，按语新卷另挂 t_veh_handle_note）',
   last_action varchar(64) DEFAULT NULL COMMENT '最近一次挪步动作',
   del_flag int DEFAULT '0' COMMENT '删除标记 0正常 1删除',
   create_by varchar(64) DEFAULT NULL COMMENT '创建者',
@@ -162,8 +180,27 @@ CREATE TABLE IF NOT EXISTS t_veh_handle_flow (
   update_by varchar(64) DEFAULT NULL COMMENT '更新者',
   update_time datetime DEFAULT NULL COMMENT '更新时间',
   remark varchar(500) DEFAULT NULL COMMENT '备注',
-  PRIMARY KEY (id)
+  PRIMARY KEY (id),
+  UNIQUE KEY uk_veh_handle_open (veh_code, alarm_kind, active_slot),
+  KEY idx_veh_handle_stage (stage, status, del_flag)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='严重报警处置单';
+
+-- 卷上挂的按语：一段一行，哪一站写了什么话、落在哪一刻；
+-- 同站第二遍报上来只改头一行（seg_ordinal 不动、不另起新行），退站重写压到卷末另攒序号。
+CREATE TABLE IF NOT EXISTS t_veh_handle_note (
+  id bigint NOT NULL COMMENT '主键',
+  flow_id bigint NOT NULL COMMENT '所属处置单',
+  stage int NOT NULL COMMENT '落在哪一站 0定性 1知会 2回告 3归档',
+  visit_no int NOT NULL DEFAULT 1 COMMENT '这一站的第几回（退站重走+1，同站第二遍不+1）',
+  source_no varchar(64) NOT NULL DEFAULT 'manual' COMMENT '来路号（同一来路第二遍并头一行；同一秒两个来路各起一行）',
+  seg_ordinal int NOT NULL COMMENT '段序（从入档往回数当班簿几笔对的就是它）',
+  note_text varchar(1000) DEFAULT NULL COMMENT '这一站写下的话',
+  written_at datetime NOT NULL COMMENT '落在哪一刻（同秒两条来路各记各的，不并一条）',
+  del_flag int DEFAULT '0' COMMENT '删除标记 0正常 1删除',
+  PRIMARY KEY (id),
+  UNIQUE KEY uk_veh_handle_note_pos (flow_id, stage, visit_no, source_no),
+  KEY idx_veh_handle_note_flow (flow_id, seg_ordinal)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='严重报警处置单按语卷';
 
 CREATE TABLE IF NOT EXISTS t_veh_move_bill (
   id bigint NOT NULL COMMENT '主键',
@@ -253,3 +290,27 @@ VALUES (0, 'YH00', '宁州顺达客运有限公司（道路旅客运输业户，
 -- ALTER TABLE t_veh_due_task ADD KEY idx_veh_due_assignee (assignee_no);
 -- 另需补建三张新表：t_veh_nonwork_day / t_veh_due_handler / t_veh_due_handler_kind（照上面 CREATE 语句）。
 
+
+-- 旧库补列（t_veh_handle_flow 为旧版表结构时逐条执行；新库由上面的 CREATE TABLE 带出，勿重复执行）：
+-- ALTER TABLE t_veh_handle_flow ADD COLUMN veh_code varchar(64) DEFAULT NULL COMMENT '车辆营运代号' AFTER biz_no;
+-- ALTER TABLE t_veh_handle_flow ADD COLUMN alarm_kind varchar(32) DEFAULT NULL COMMENT '报警类别 speed/fatigue' AFTER veh_code;
+-- ALTER TABLE t_veh_handle_flow ADD COLUMN alarm_at datetime DEFAULT NULL COMMENT '报警发生那一刻' AFTER alarm_kind;
+-- ALTER TABLE t_veh_handle_flow ADD COLUMN metric_value decimal(14,4) DEFAULT NULL COMMENT '当刻那个数' AFTER alarm_at;
+-- ALTER TABLE t_veh_handle_flow ADD COLUMN site_no varchar(64) DEFAULT NULL COMMENT '所对业户代号' AFTER metric_value;
+-- ALTER TABLE t_veh_handle_flow MODIFY COLUMN stage int DEFAULT 0 COMMENT '当前停在哪一站（系统数已过站口）';
+-- ALTER TABLE t_veh_handle_flow MODIFY COLUMN status int DEFAULT 0 COMMENT '情形 0未起 1在办 2已封尾';
+-- ALTER TABLE t_veh_handle_flow ADD COLUMN notice_count int DEFAULT 0 COMMENT '知会该齐的笔数' AFTER status;
+-- ALTER TABLE t_veh_handle_flow ADD COLUMN notice_done int DEFAULT 0 COMMENT '知会已记的笔数' AFTER notice_count;
+-- ALTER TABLE t_veh_handle_flow ADD COLUMN reply_due_hours int DEFAULT NULL COMMENT '回告要守满的钟点' AFTER notice_done;
+-- ALTER TABLE t_veh_handle_flow ADD COLUMN notice_at datetime DEFAULT NULL COMMENT '知会出站那一刻' AFTER reply_due_hours;
+-- ALTER TABLE t_veh_handle_flow ADD COLUMN review_opinion varchar(500) DEFAULT NULL COMMENT '复查意见' AFTER notice_at;
+-- ALTER TABLE t_veh_handle_flow ADD COLUMN close_kind varchar(32) DEFAULT NULL COMMENT '收口名目' AFTER review_opinion;
+-- ALTER TABLE t_veh_handle_flow ADD COLUMN closed_at datetime DEFAULT NULL COMMENT '收口那一刻' AFTER close_kind;
+-- ALTER TABLE t_veh_handle_flow ADD COLUMN active_slot int DEFAULT 1 COMMENT '在办口（收口置NULL）' AFTER closed_at;
+-- UPDATE t_veh_handle_flow SET active_slot = NULL WHERE status = 2;
+-- ALTER TABLE t_veh_handle_flow ADD UNIQUE KEY uk_veh_handle_open (veh_code, alarm_kind, active_slot);
+-- ALTER TABLE t_veh_handle_flow ADD KEY idx_veh_handle_stage (stage, status, del_flag);
+-- 另需补建新表 t_veh_handle_note（照上面 CREATE 语句，按语卷）。
+-- ALTER TABLE t_veh_handle_flow ADD COLUMN visit_no int DEFAULT 1 COMMENT '当前站第几回到' AFTER active_slot;
+-- ALTER TABLE t_veh_handle_flow ADD COLUMN claimed_stage int DEFAULT NULL COMMENT '报文捎来的步次（只作来意留痕）' AFTER visit_no;
+-- ALTER TABLE t_veh_handle_note ADD COLUMN source_no varchar(64) NOT NULL DEFAULT 'manual' COMMENT '来路号' AFTER visit_no;
